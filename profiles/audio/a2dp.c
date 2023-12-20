@@ -307,6 +307,7 @@ static int error_to_errno(struct avdtp_error *err)
 	switch (perr) {
 	case EHOSTDOWN:
 	case ECONNABORTED:
+	case EBADE:
 		return -perr;
 	default:
 		/*
@@ -2522,7 +2523,8 @@ static void confirm_cb(GIOChannel *io, gpointer data)
 		if (!setup || !setup->stream)
 			goto drop;
 
-		if (setup->io) {
+		if (setup->io || avdtp_stream_get_transport(setup->stream,
+						NULL, NULL, NULL, NULL)) {
 			error("transport channel already exists");
 			goto drop;
 		}

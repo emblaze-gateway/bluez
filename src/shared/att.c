@@ -193,6 +193,7 @@ struct att_send_op {
 	uint8_t opcode;
 	void *pdu;
 	uint16_t len;
+	bool retry;
 	bt_att_response_func_t callback;
 	bt_att_destroy_func_t destroy;
 	void *user_data;
@@ -785,6 +786,12 @@ static bool handle_error_rsp(struct bt_att_chan *chan, uint8_t *pdu,
 
 	*opcode = rsp->opcode;
 
+	/* If operation has already been marked as retry don't attempt to change
+	 * the security again.
+	 */
+	if (op->retry)
+		return false;
+
 	/* Attempt to change security */
 	if (!change_security(chan, rsp->ecode))
 		return false;
@@ -798,9 +805,10 @@ static bool handle_error_rsp(struct bt_att_chan *chan, uint8_t *pdu,
 	DBG(att, "(chan %p) Retrying operation %p", chan, op);
 
 	chan->pending_req = NULL;
+	op->retry = true;
 
-	/* Push operation back to request queue */
-	return queue_push_head(att->req_queue, op);
+	/* Push operation back to channel queue */
+	return queue_push_head(chan->queue, op);
 }
 
 static void handle_rsp(struct bt_att_chan *chan, uint8_t opcode, uint8_t *pdu,
@@ -1588,6 +1596,14 @@ unsigned int bt_att_send(struct bt_att *att, uint8_t opcode,
 
 	op->id = att->next_send_id++;
 
+	/* Always use fixed channel for BT_ATT_OP_MTU_REQ */
+	if (opcode == BT_ATT_OP_MTU_REQ) {
+		struct bt_att_chan *chan = queue_peek_tail(att->chans);
+
+		result = queue_push_tail(chan->queue, op);
+		goto done;
+	}
+
 	/* Add the op to the correct queue based on its type */
 	switch (op->type) {
 	case ATT_OP_TYPE_REQ:
@@ -1606,6 +1622,7 @@ unsigned int bt_att_send(struct bt_att *att, uint8_t opcode,
 		break;
 	}
 
+done:
 	if (!result) {
 		free(op->pdu);
 		free(op);

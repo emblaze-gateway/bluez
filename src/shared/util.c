@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -26,6 +27,13 @@
 
 #ifdef HAVE_SYS_RANDOM_H
 #include <sys/random.h>
+#endif
+
+#include <lib/bluetooth.h>
+
+/* define MAX_INPUT for musl */
+#ifndef MAX_INPUT
+#define MAX_INPUT _POSIX_MAX_INPUT
 #endif
 
 #include "src/shared/util.h"
@@ -65,7 +73,7 @@ void *util_memdup(const void *src, size_t size)
 void util_debug_va(util_debug_func_t function, void *user_data,
 				const char *format, va_list va)
 {
-	char str[78];
+	char str[MAX_INPUT];
 
 	if (!function || !format)
 		return;
@@ -130,6 +138,96 @@ void util_hexdump(const char dir, const unsigned char *buf, size_t len,
 	}
 }
 
+/* Helper to print debug information of bitfields */
+uint64_t util_debug_bit(const char *label, uint64_t val,
+				const struct util_bit_debugger *table,
+				util_debug_func_t function, void *user_data)
+{
+	uint64_t mask = val;
+	int i;
+
+	for (i = 0; table[i].str; i++) {
+		if (val & (((uint64_t) 1) << table[i].bit)) {
+			util_debug(function, user_data, "%s%s", label,
+							table[i].str);
+			mask &= ~(((uint64_t) 1) << table[i].bit);
+		}
+	}
+
+	return mask;
+}
+
+static const struct util_ltv_debugger*
+ltv_debugger(const struct util_ltv_debugger *debugger, size_t num, uint8_t type)
+{
+	size_t i;
+
+	if (!debugger || !num)
+		return NULL;
+
+	for (i = 0; i < num; i++) {
+		const struct util_ltv_debugger *debug = &debugger[i];
+
+		if (debug->type == type)
+			return debug;
+	}
+
+	return NULL;
+}
+
+/* Helper to print debug information of LTV entries */
+bool util_debug_ltv(const uint8_t *data, uint8_t len,
+			const struct util_ltv_debugger *debugger, size_t num,
+			util_debug_func_t function, void *user_data)
+{
+	struct iovec iov;
+	int i;
+
+	iov.iov_base = (void *) data;
+	iov.iov_len = len;
+
+	for (i = 0; iov.iov_len; i++) {
+		uint8_t l, t, *v;
+		const struct util_ltv_debugger *debug;
+
+		if (!util_iov_pull_u8(&iov, &l)) {
+			util_debug(function, user_data,
+					"Unable to pull length");
+			return false;
+		}
+
+		if (!l) {
+			util_debug(function, user_data, "#%d: len 0x%02x",
+					i, l);
+			continue;
+		}
+
+		if (!util_iov_pull_u8(&iov, &t)) {
+			util_debug(function, user_data, "Unable to pull type");
+			return false;
+		}
+
+		util_debug(function, user_data, "#%d: len 0x%02x type 0x%02x",
+					i, l, t);
+
+		l--;
+
+		v = util_iov_pull_mem(&iov, l);
+		if (!v) {
+			util_debug(function, user_data, "Unable to pull value");
+			return false;
+		}
+
+		debug = ltv_debugger(debugger, num, t);
+		if (debug)
+			debug->func(v, l, function, user_data);
+		else
+			util_hexdump(' ', (void *)v, l, function, user_data);
+	}
+
+	return true;
+}
+
 /* Helper for getting the dirent type in case readdir returns DT_UNKNOWN */
 unsigned char util_get_dt(const char *parent, const char *name)
 {
@@ -187,6 +285,335 @@ void util_clear_uid(uint64_t *bitmap, uint8_t id)
 		return;
 
 	*bitmap &= ~(((uint64_t)1) << (id - 1));
+}
+
+struct iovec *util_iov_dup(const struct iovec *iov, size_t cnt)
+{
+	struct iovec *dup;
+	size_t i;
+
+	if (!iov)
+		return NULL;
+
+	dup = new0(struct iovec, cnt);
+
+	for (i = 0; i < cnt; i++)
+		util_iov_memcpy(&dup[i], iov[i].iov_base, iov[i].iov_len);
+
+	return dup;
+}
+
+int util_iov_memcmp(const struct iovec *iov1, const struct iovec *iov2)
+{
+	if (!iov1)
+		return 1;
+
+	if (!iov2)
+		return -1;
+
+	if (iov1->iov_len != iov2->iov_len)
+		return iov1->iov_len - iov2->iov_len;
+
+	return memcmp(iov1->iov_base, iov2->iov_base, iov1->iov_len);
+}
+
+void util_iov_memcpy(struct iovec *iov, void *src, size_t len)
+{
+	if (!iov || !src || !len)
+		return;
+
+	iov->iov_base = realloc(iov->iov_base, len);
+	iov->iov_len = len;
+	memcpy(iov->iov_base, src, len);
+}
+
+void util_iov_free(struct iovec *iov, size_t cnt)
+{
+	size_t i;
+
+	if (!iov)
+		return;
+
+	for (i = 0; i < cnt; i++)
+		free(iov[i].iov_base);
+
+	free(iov);
+}
+
+void *util_iov_push(struct iovec *iov, size_t len)
+{
+	void *data;
+
+	if (!iov)
+		return NULL;
+
+	data = iov->iov_base + iov->iov_len;
+	iov->iov_len += len;
+
+	return data;
+}
+
+void *util_iov_push_mem(struct iovec *iov, size_t len, const void *data)
+{
+	void *p;
+
+	p = util_iov_push(iov, len);
+	if (!p)
+		return NULL;
+
+	if (data)
+		memcpy(p, data, len);
+
+	return p;
+}
+
+void *util_iov_push_le64(struct iovec *iov, uint64_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_le64(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be64(struct iovec *iov, uint64_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_be64(val, p);
+
+	return p;
+}
+
+void *util_iov_push_le32(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_le32(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be32(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_be32(val, p);
+
+	return p;
+}
+
+void *util_iov_push_le24(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(uint24_t));
+	if (!p)
+		return NULL;
+
+	put_le24(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be24(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(uint24_t));
+	if (!p)
+		return NULL;
+
+	put_le24(val, p);
+
+	return p;
+}
+
+void *util_iov_push_le16(struct iovec *iov, uint16_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_le16(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be16(struct iovec *iov, uint16_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_be16(val, p);
+
+	return p;
+}
+
+void *util_iov_push_u8(struct iovec *iov, uint8_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_u8(val, p);
+
+	return p;
+}
+
+void *util_iov_pull(struct iovec *iov, size_t len)
+{
+	if (!iov)
+		return NULL;
+
+	if (iov->iov_len < len)
+		return NULL;
+
+	iov->iov_base += len;
+	iov->iov_len -= len;
+
+	return iov->iov_base;
+}
+
+void *util_iov_pull_mem(struct iovec *iov, size_t len)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, len))
+		return data;
+
+	return NULL;
+}
+
+void *util_iov_pull_le64(struct iovec *iov, uint64_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_le64(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be64(struct iovec *iov, uint64_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_be64(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_le32(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_le32(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be32(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_be32(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_le24(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(uint24_t))) {
+		*val = get_le24(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be24(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(uint24_t))) {
+		*val = get_be24(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_le16(struct iovec *iov, uint16_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_le16(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be16(struct iovec *iov, uint16_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_be16(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_u8(struct iovec *iov, uint8_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_u8(data);
+		return data;
+	}
+
+	return NULL;
 }
 
 static const struct {
@@ -338,13 +765,18 @@ static const struct {
 	{ 0x1849, "Generic Media Control"			},
 	{ 0x184b, "Telephony Bearer"				},
 	{ 0x184c, "Generic Telephony Bearer"			},
-	{ 0x184c, "Microphone Control"				},
+	{ 0x184d, "Microphone Control"				},
 	{ 0x184e, "Audio Stream Control"			},
 	{ 0x184f, "Broadcast Audio Scan"			},
 	{ 0x1850, "Published Audio Capabilities"		},
 	{ 0x1851, "Basic Audio Announcement"			},
 	{ 0x1852, "Broadcast Audio Announcement"		},
-	/* 0x1853 to 0x27ff undefined */
+	{ 0x1853, "Common Audio"				},
+	{ 0x1854, "Hearing Aid"					},
+	{ 0x1855, "Telephony and Media Audio"			},
+	{ 0x1856, "Public Broadcast Announcement"		},
+	{ 0x1858, "Gaming Audio"				},
+	/* 0x1857 to 0x27ff undefined */
 	{ 0x2800, "Primary Service"				},
 	{ 0x2801, "Secondary Service"				},
 	{ 0x2802, "Include"					},
@@ -578,6 +1010,7 @@ static const struct {
 	{ 0x2b29, "Client Supported Features"			},
 	{ 0x2b2A, "Database Hash"				},
 	{ 0x2b3a, "Server Supported Features"			},
+	{ 0x2b51, "Telephony and Media Audio Profile Role"	},
 	{ 0x2b77, "Audio Input State"				},
 	{ 0x2b78, "Gain Settings Attribute"			},
 	{ 0x2b79, "Audio Input Type"				},
@@ -592,6 +1025,9 @@ static const struct {
 	{ 0x2b82, "Volume Offset Control Point"			},
 	{ 0x2b83, "Audio Output Description"			},
 	{ 0x2b84, "Set Identity Resolving Key"			},
+	{ 0x2b85, "Coordinated Set Size"			},
+	{ 0x2b86, "Set Member Lock"				},
+	{ 0x2b87, "Set Member Rank"				},
 	{ 0x2b93, "Media Player Name"				},
 	{ 0x2b94, "Media Player Icon Object ID"			},
 	{ 0x2b95, "Media Player Icon URL"			},
@@ -645,6 +1081,14 @@ static const struct {
 	{ 0x2bcc, "Source Audio Locations"			},
 	{ 0x2bcd, "Available Audio Contexts"			},
 	{ 0x2bce, "Supported Audio Contexts"			},
+	{ 0x2bda, "Hearing Aid Features"			},
+	{ 0x2bdb, "Hearing Aid Preset Control Point"		},
+	{ 0x2bdc, "Active Preset Index"				},
+	{ 0x2c00, "GMAP Role"					},
+	{ 0x2c01, "UGG Features"				},
+	{ 0x2c02, "UGT Features"				},
+	{ 0x2c03, "BGS Features"				},
+	{ 0x2c03, "BGR Features"				},
 	/* vendor defined */
 	{ 0xfeff, "GN Netcom"					},
 	{ 0xfefe, "GN ReSound A/S"				},
@@ -1356,4 +1800,66 @@ int strsuffix(const char *str, const char *suffix)
 		return -1;
 
 	return strncmp(str + len - suffix_len, suffix, suffix_len);
+}
+
+char *strstrip(char *str)
+{
+	size_t size;
+	char *end;
+
+	if (!str)
+		return NULL;
+
+	size = strlen(str);
+	if (!size)
+		return str;
+
+	end = str + size - 1;
+	while (end >= str && isspace(*end))
+		end--;
+	*(end + 1) = '\0';
+
+	while (*str && isspace(*str))
+		str++;
+
+	return str;
+}
+
+bool strisutf8(const char *str, size_t len)
+{
+	size_t i = 0;
+
+	while (i < len) {
+		unsigned char c = str[i];
+		size_t size = 0;
+
+		/* Check the first byte to determine the number of bytes in the
+		 * UTF-8 character.
+		 */
+		if ((c & 0x80) == 0x00)
+			size = 1;
+		else if ((c & 0xE0) == 0xC0)
+			size = 2;
+		else if ((c & 0xF0) == 0xE0)
+			size = 3;
+		else if ((c & 0xF8) == 0xF0)
+			size = 4;
+		else
+			/* Invalid UTF-8 sequence */
+			return false;
+
+		/* Check the following bytes to ensure they have the correct
+		 * format.
+		 */
+		for (size_t j = 1; j < size; ++j) {
+			if (i + j > len || (str[i + j] & 0xC0) != 0x80)
+				/* Invalid UTF-8 sequence */
+				return false;
+		}
+
+		/* Move to the next character */
+		i += size;
+	}
+
+	return true;
 }

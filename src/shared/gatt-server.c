@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Google Inc.
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -845,7 +846,7 @@ static void write_cb(struct bt_att_chan *chan, uint8_t opcode, const void *pdu,
 	DBG(server, "Write %s - handle: 0x%04x",
 		(opcode == BT_ATT_OP_WRITE_REQ) ? "Req" : "Cmd", handle);
 
-	ecode = check_length(length, 0);
+	ecode = check_length(length - 2, 0);
 	if (ecode)
 		goto error;
 
@@ -1332,7 +1333,7 @@ static void prep_write_cb(struct bt_att_chan *chan, uint8_t opcode,
 
 	DBG(server, "Prep Write Req - handle: 0x%04x", handle);
 
-	ecode = check_length(length, offset);
+	ecode = check_length(length - 4, offset);
 	if (ecode)
 		goto error;
 
@@ -1785,7 +1786,9 @@ bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 		length = MIN(data->len - data->offset, length);
 	}
 
-	memcpy(data->pdu + data->offset, value, length);
+	if (value)
+		memcpy(data->pdu + data->offset, value, length);
+
 	data->offset += length;
 
 	if (multiple) {
