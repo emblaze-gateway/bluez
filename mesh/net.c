@@ -2479,6 +2479,7 @@ static void net_msg_recv(void *user_data, struct mesh_io_recv_info *info,
 			net_data.relay_advice == RELAY_ALLOWED) {
 		uint8_t ttl = net_data.out[1] & TTL_MASK;
 
+		l_info("Relay: %llu", hash);
 		net_data.out[1] &=  ~TTL_MASK;
 		net_data.out[1] |= ttl - 1;
 		net_key_encrypt(net_data.net_key_id, net_data.iv_index,
