@@ -107,6 +107,7 @@ struct node_import {
 	struct {
 		bool ivu;
 		bool kr;
+		uint32_t seq_nr;
 	} flags;
 	uint32_t iv_index;
 	uint16_t unicast;
@@ -1418,6 +1419,9 @@ static void get_managed_objects_cb(struct l_dbus_message *msg, void *user_data)
 	struct keyring_net_key net_key;
 	uint8_t dev_key[16];
 
+	if (req->type == REQUEST_TYPE_IMPORT)
+		node->seq_number = req->import->flags.seq_nr;
+
 	if (req->type == REQUEST_TYPE_ATTACH)
 		req->attach->busy = false;
 
@@ -1665,7 +1669,7 @@ void node_join(const char *app_root, const char *sender, const uint8_t *uuid,
 
 void node_import(const char *app_root, const char *sender, const uint8_t *uuid,
 			const uint8_t dev_key[16], const uint8_t net_key[16],
-			uint16_t net_idx, bool kr, bool ivu,
+			uint16_t net_idx, bool kr, bool ivu, uint32_t seq_nr,
 			uint32_t iv_index, uint16_t unicast,
 			node_ready_func_t cb, void *user_data)
 {
@@ -1685,6 +1689,7 @@ void node_import(const char *app_root, const char *sender, const uint8_t *uuid,
 	req->import->net_idx = net_idx;
 	req->import->flags.kr = kr;
 	req->import->flags.ivu = ivu;
+	req->import->flags.seq_nr = seq_nr;
 	req->import->iv_index = iv_index;
 	req->import->unicast = unicast;
 

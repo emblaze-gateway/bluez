@@ -78,7 +78,7 @@ void node_create(const char *app_root, const char *sender, const uint8_t *uuid,
 					node_ready_func_t cb, void *user_data);
 void node_import(const char *app_root, const char *sender, const uint8_t *uuid,
 			const uint8_t dev_key[16], const uint8_t net_key[16],
-			uint16_t net_idx, bool kr, bool ivu,
+			uint16_t net_idx, bool kr, bool ivu, uint32_t seq_nr,
 			uint32_t iv_index, uint16_t unicast,
 			node_ready_func_t cb, void *user_data);
 bool node_dbus_init(struct l_dbus *bus);

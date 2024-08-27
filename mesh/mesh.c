@@ -819,6 +819,7 @@ static struct l_dbus_message *import_call(struct l_dbus *dbus,
 	uint16_t net_idx;
 	bool kr = false;
 	bool ivu = false;
+	uint32_t seq_nr = DEFAULT_SEQUENCE_NUMBER;
 	uint32_t iv_index;
 	uint16_t unicast;
 	uint32_t n;
@@ -865,6 +866,11 @@ static struct l_dbus_message *import_call(struct l_dbus *dbus,
 			l_dbus_message_iter_get_variant(&var, "b", &kr))
 			continue;
 
+		if (!strcmp(key, "SequenceNumber") &&
+			l_dbus_message_iter_get_variant(&var, "u", &seq_nr) ||
+							seq_nr < SEQ_MASK)
+			continue;
+
 		return dbus_error(msg, MESH_ERROR_INVALID_ARGS,
 							"Bad flags");
 	}
@@ -879,7 +885,7 @@ static struct l_dbus_message *import_call(struct l_dbus *dbus,
 	l_queue_push_tail(pending_queue, pending_msg);
 
 	node_import(app_path, sender, uuid, dev_key, net_key, net_idx, kr, ivu,
-			iv_index, unicast, create_node_ready_cb, pending_msg);
+			seq_nr, iv_index, unicast, create_node_ready_cb, pending_msg);
 
 	return NULL;
 }
